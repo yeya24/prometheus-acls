@@ -6,18 +6,18 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/coreos/go-oidc"
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/sessions"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
 
 	"github.com/bitsbeats/prometheus-acls/internal/config"
-	"github.com/bitsbeats/prometheus-acls/internal/core"
 	"github.com/bitsbeats/prometheus-acls/internal/prom"
 )
 
@@ -129,7 +129,7 @@ func (a OidcAuth) auth(r *http.Request) (t *oidc.IDToken, err error) {
 	return
 }
 
-func (a OidcAuth) loadACL(idToken *oidc.IDToken) (acl core.ACL, err error) {
+func (a OidcAuth) loadRoles(idToken *oidc.IDToken) (roles []string, err error) {
 	// add auth to context
 	var claimsLoader interface{}
 	err = idToken.Claims(&claimsLoader)
@@ -140,24 +140,42 @@ func (a OidcAuth) loadACL(idToken *oidc.IDToken) (acl core.ACL, err error) {
 	if !ok {
 		return nil, fmt.Errorf("unable to cast access token claims")
 	}
-	roles, ok := claimsMap[a.cfg.OidcRolesClaim].([]interface{})
+	resourceAccess, ok := claimsMap["resource_access"]
 	if !ok {
 		return nil, fmt.Errorf("unable to load acces token claims from %s", a.cfg.OidcRolesClaim)
 	}
-	for _, role := range roles {
+	resourceAccessMap, ok := resourceAccess.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unable to load acces token claims from %s", a.cfg.OidcRolesClaim)
+	}
+	access, ok := resourceAccessMap["thanos"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unable to load acces token claims from %s", a.cfg.OidcRolesClaim)
+	}
+	accessRoles, ok := access["roles"]
+	if !ok {
+		return nil, fmt.Errorf("unable to load acces token claims from %s", a.cfg.OidcRolesClaim)
+	}
+	rs, ok := accessRoles.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unable to load acces token claims from %s", a.cfg.OidcRolesClaim)
+	}
+	roles = make([]string, 0, len(rs))
+	for _, role := range rs {
 		var ok bool
 		role, ok := role.(string)
 		if !ok {
 			continue
 		}
-		acl, ok = a.cfg.ACLMap.GetACL(role)
-		if ok {
-			break
-		}
+		roles = append(roles, role)
+		//acl, ok = a.cfg.ACLMap.GetACL(role)
+		//if ok {
+		//	break
+		//}
 	}
-	if acl == nil {
-		acl = a.cfg.ACLMap.GetDenyACL()
-	}
+	//if acl == nil {
+	//	acl = a.cfg.ACLMap.GetDenyACL()
+	//}
 	return
 }
 
@@ -240,13 +258,24 @@ func (a OidcAuth) Middleware(next http.Handler) http.Handler {
 			prom.SendError(w, r, err.Error(), http.StatusBadRequest, a.redirectErrorHandler)
 			return
 		}
-		acl, err := a.loadACL(idToken)
+		roles, err := a.loadRoles(idToken)
 		if err != nil {
-			log.WithError(err).Error("unable to load acl")
-			prom.SendError(w, r, "unable to load acl", http.StatusBadRequest, a.redirectErrorHandler)
+			prom.SendError(w, r, err.Error(), http.StatusBadRequest, a.redirectErrorHandler)
 			return
 		}
-		r = r.WithContext(context.WithValue(r.Context(), "acl", acl))
+		ns := "gitops-" + strings.TrimSuffix(strings.TrimPrefix(roles[0], "thanos-proj-"), "-owner")
+		params, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			return
+		}
+		params.Add("namespace", ns)
+		r.URL.RawQuery = params.Encode()
+		//if err != nil {
+		//	log.WithError(err).Error("unable to load acl")
+		//	prom.SendError(w, r, "unable to load acl", http.StatusBadRequest, a.redirectErrorHandler)
+		//	return
+		//}
+		//r = r.WithContext(context.WithValue(r.Context(), "acl", acl))
 
 		// handle request
 		next.ServeHTTP(w, r)

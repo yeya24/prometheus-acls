@@ -2,15 +2,14 @@ package main
 
 import (
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 
+	"github.com/prometheus-community/prom-label-proxy/injectproxy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/bitsbeats/prometheus-acls/internal/auth"
 	"github.com/bitsbeats/prometheus-acls/internal/config"
-	"github.com/bitsbeats/prometheus-acls/internal/labeler"
 )
 
 func main() {
@@ -39,12 +38,13 @@ func main() {
 	if err != nil {
 		log.WithError(err).Fatalf("unable to parse prometheus url")
 	}
-	proxy := httputil.NewSingleHostReverseProxy(u)
-	l := labeler.NewLabeler()
-	promacl := l.PromACLMiddlewareFor(u)
 
+	routes, err := injectproxy.NewRoutes(u, "namespace", injectproxy.WithEnabledLabelsAPI())
+	if err != nil {
+		log.WithError(err).Fatalf("unable to parse prometheus url")
+	}
 	// authprotect -> acls -> prometheus
-	mux.Handle("/", a.Middleware(promacl(proxy)))
+	mux.Handle("/", a.Middleware(routes))
 
 	// serve
 	log.WithField("listen", cfg.Listen).Info("listening")
